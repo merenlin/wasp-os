@@ -1,31 +1,10 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 # Copyright (C) 2021 github.com/thiswillbeyourgithub/
 
-"""Sleep tracker
+"""Track motion and HR
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-SleepTk is a sleep monitor and alarm clock with several dinstinctive features:
-    * **Privacy friendly**: your data is not sent to anyone, it is stored directly on the watch (but you can still download it if needed).
-    * **Fully open source**
-    * **Easy to snooze but hard to stop** You have to swipe several times to make it stop, but can snooze easily.
-    * **Optimized for waking up refreshed**: suggests wake up time according to average sleep cycles length.
-    * **Gradual wake**: vibrates the watch a tiny bit a few times before the alarm to lift you gently back to consciousness.
-    * **Natural wake**: small vibration every 30s until you wake up, instead of a full blown alarm.
-    * **Insomnia insights**: if you turn on the screen during the night, SleepTk will tell you how long you slept and in what part of the sleep cycle you are supposed to be. Helpful to figure out insomnia patterns.
-    * **Body tracking**: logs your body movement during the night, infers your sleep cycle and write it all down in a `.csv` file.
-    * **Heart tracking**: tracks your heart rate throughout the night. *(edit: will be vastly improved when [this issue][https://github.com/daniel-thompson/wasp-os/pull/363#issuecomment-1257055637) gets sorted out)*
-    * **Status: fully functional**
 
-Still somewhat under developpement, more information at
-[the github](https://github.com/thiswillbeyourgithub/sleep_tracker_pinetime_wasp-os)
-
-Icon kindly designed by [Emanuel Löffler](https://github.com/plan5)
-
-.. figure:: res/screenshots/SleepTkApp.png
-    :width: 179
-
-Note: the time might be inaccurate in the simulator (offset by 1 hour passed
-midnight or something) but is fine on the watch.
 """
 
 import wasp
@@ -61,7 +40,7 @@ icon = (
 # HARDCODED VARIABLES:
 _ON = const(1)
 _OFF = const(0)
-_SLEEPING = const(0)
+_TRACKING = const(0)
 _RINGING = const(1)
 _SETTINGS1 = const(2)
 _SETTINGS2 = const(3)
@@ -74,8 +53,6 @@ _KILL_BT = const(0)
 # set to 0 to disable turning off bluetooth while tracking to save battery
 # (you have to reboot the watch to reactivate BT, default: 0)
 _STOP_LIMIT = const(10)
-# number of times to swipe or press the button to turn off ringing (default: 10)
-_SNOOZE_TIME = const(180)
 # number of seconds to snooze for (default: 180 i.e. 3 minutes)
 _FREQ = const(2)
 # get accelerometer data every X seconds, but process and store them only
@@ -85,27 +62,11 @@ _HR_FREQ = const(15)
 _STORE_FREQ = const(15)
 # process data and store to file every X seconds (recomended: 120)
 _BATTERY_THRESHOLD = const(20)
-# under X% of battery, stop tracking and only keep the alarm, set at -200
-# or lower to disable (default: 30)
-_GRADUAL_WAKE = array("f", (0.5, 1, 1.5, 2, 3, 4, 5, 7, 10))
-# nb of minutes before alarm to send a tiny vibration, designed to wake
-# you more gently. (default: array("f", (0.5, 1, 1.5, 2, 3, 4, 5, 6, 8, 10)) )
-_NATURAL_WAKE_IVL = const(60)
-# nb of seconds between vibration when natural wake is on.
-_NATURAL_WAKE_RAND = const(30)
-# percent of _NATURAL_WAKE_IVL to be randomized. For example 20 means that
-# the natural wake will happen at x + x * 20 / 100 * (random.random() - 0.5) * 2
-_CYCLE_LENGTH = const(95)
-# sleep cycle length in minutes. Currently used only to display best wake up
-# time! (default should be: 90 or 100, according to https://sleepyti.me/)
-_SLEEP_GOAL_CYCLE = const(5)
-# number of sleep cycle you wish to sleep. With _CYCLE_LENGTH this is used
-# to suggest best wake up time to user when setting the alarm. (default: 5)
-##################################################
+#################################################
 
 
-class SleepTkApp():
-    NAME = 'SleepTk'
+class TrackApp():
+    NAME = 'Track'
     ICON = icon
     VERSION = const(1)
 
@@ -119,10 +80,10 @@ class SleepTkApp():
         of directly when the watch is booted."""
         wasp.gc.collect()
 
-        self._state_alarm = _ON
+        self._state_alarm = _OFF
         self._state_body_tracking = _ON
         self._state_HR_tracking = _ON
-        self._state_gradual_wake = _ON
+        self._state_gradual_wake = _OFF
         self._state_natwake = _OFF
         # try to reload previous settings
         if hasattr(wasp.system, "get") and callable(wasp.system.get):
@@ -178,7 +139,7 @@ class SleepTkApp():
                                   wasp.EventMask.SWIPE_LEFTRIGHT |
                                   wasp.EventMask.SWIPE_UPDOWN |
                                   wasp.EventMask.BUTTON)
-        if self._page == _SLEEPING and self._track_HR_once:
+        if self._page == _TRACKING and self._track_HR_once:
             wasp.system.request_tick(1000 // 8)
 
     def sleep(self):
@@ -192,10 +153,7 @@ class SleepTkApp():
         self.stat_bar = None
         if not hasattr(self, "_WU_t"):
             # also removes possible reference to the previous class
-            wasp.system.cancel_alarm(None, self._activate_ticks_to_ring)
-            wasp.system.cancel_alarm(None, self._start_natural_wake)
             wasp.system.cancel_alarm(None, self._trackOnce)
-            wasp.system.cancel_alarm(None, self._tiny_vibration)
         wasp.gc.collect()
 
     def _try_stop_alarm(self):
@@ -223,7 +181,7 @@ class SleepTkApp():
         self._conf_view = _OFF
         if self._page == _RINGING:
             self._try_stop_alarm()
-        elif self._page == _SLEEPING:
+        elif self._page == _TRACKING:
             self.stat_bar = widgets.StatusBar()
             self.stat_bar.clock = True
             wasp.watch.drawable.set_color(_FONT_COLOR)
@@ -270,10 +228,10 @@ class SleepTkApp():
         wasp.watch.display.poweron()
         draw.set_font(_FONT)
         self._last_touch = int(wasp.watch.rtc.time())
-        if self._page == _SLEEPING:
+        if self._page == _TRACKING:
             wasp.watch.drawable.set_color(_FONT_COLOR)
         self.stat_bar.draw()
-        if self._page == _SLEEPING:
+        if self._page == _TRACKING:
             if self._meta_state == 2:  # if gradual vibration
                 self._meta_state = 3  # also touched
             else:
@@ -294,22 +252,7 @@ class SleepTkApp():
                         return
                     self._conf_view = _OFF
                 draw.reset()
-        elif self._page == _RINGING:
-            if self.btn_snooz.touch(event):
-                if self._track_HR_once:  # if currently tracking HR, stop
-                    self._track_HR_once = _OFF
-                    self._hrdata = None
-                    wasp.watch.hrs.disable()
-                wasp.system.cancel_alarm(None, self._start_natural_wake)
-                wasp.system.cancel_alarm(None, self._activate_ticks_to_ring)
-                self._WU_t = int(wasp.watch.rtc.time()) + _SNOOZE_TIME
-                if self._state_natwake:
-                    wasp.system.set_alarm(self._WU_t, self._start_natural_wake)
-                else:
-                    wasp.system.set_alarm(self._WU_t, self._activate_ticks_to_ring)
-                self._page = _SLEEPING
-                wasp.system.sleep()
-                return
+      
         elif self._page == _SETTINGS1:
             if self._state_alarm and (self._spin_H.touch(event) or self._spin_M.touch(event)):
                 if self._state_spinval_M == 0 and self._spin_M.value == 55:
@@ -344,15 +287,7 @@ class SleepTkApp():
                     self.btn_HR.draw()
                     self._state_HR_tracking = self.btn_HR.state
                     return
-            if self._state_alarm:
-                if self.check_grad.touch(event):
-                    self._state_gradual_wake = self.check_grad.state
-                    self.check_grad.draw()
-                    return
-                elif self.check_natwake.touch(event):
-                    self._state_natwake = self.check_natwake.state
-                    self.check_natwake.draw()
-                    return
+    
             if self.btn_sta.touch(event):
                 draw.fill()
                 draw.string("Loading", 0, 100)
@@ -375,7 +310,7 @@ class SleepTkApp():
             duration = (self._read_time(self._state_spinval_H, self._state_spinval_M) - wasp.watch.rtc.time()) / 60
             percent_str = ""
             y = 180
-        elif self._page == _SLEEPING:
+        elif self._page == _TRACKING:
             draw.set_color(_FONT_COLOR)
             duration = (wasp.watch.rtc.time() - self._track_start_time) / 60
             if self._state_alarm:
@@ -387,23 +322,11 @@ class SleepTkApp():
                 return
             y = 130
 
-        draw.string("Sleep: {:02d}h{:02d}m{}".format(
+        draw.string("Tracking: {:02d}h{:02d}m{}".format(
             int(duration // 60),
             int(duration % 60),
             percent_str), 0, y)
-        cycl = duration / _CYCLE_LENGTH
-        cycl_modulo = cycl % 1
-        draw.string("so {} cycles   ".format(str(cycl)[0:4]), 0, y + 20)
-        if duration > 30 and not self._track_HR_once:
-            if cycl_modulo > 0.10 and cycl_modulo < 0.90:
-                draw.set_font(_FONT)
-                draw.string("Not rested!", 0, y + 40)
-            else:
-                draw.reset()
-                draw.set_font(_FONT)
-                draw.string("Well rested", 0, y + 39)
-                draw.set_color(_FONT_COLOR)
-
+     
     def _draw(self):
         """GUI"""
         wasp.watch.display.mute(False)
@@ -414,26 +337,11 @@ class SleepTkApp():
         self.stat_bar.draw()
         draw.set_font(_FONT)
         draw.set_color(_FONT_COLOR)
-        if self._page == _RINGING:
-            ti = wasp.watch.time.localtime(self._WU_t_orig)
-            draw.string("WAKE UP - {:02d}:{:02d}".format(ti[3], ti[4]), 0, 50)
-            self.btn_snooz = widgets.Button(x=0, y=90, w=240, h=120, label="SNOOZE")
-            self.btn_snooz.draw()
-            draw.reset()
-        elif self._page == _SLEEPING:
+        
+        if self._page == _TRACKING:
             self.stat_bar.draw()  # updates color
-            ti_start = wasp.watch.time.localtime(self._track_start_time)
-            if self._state_alarm:
-                ti_stop = wasp.watch.time.localtime(self._WU_t_orig)
-                draw.string('{:02d}:{:02d}  ->|  {:02d}:{:02d}'.format(ti_start[3], ti_start[4], ti_stop[3], ti_stop[4]), 0, 50)
-                if self._state_gradual_wake and self._state_natwake:
-                    draw.string("(Grad&Nat wake)", 0, 70)
-                elif self._state_gradual_wake:
-                    draw.string("(Gradual wake)", 0, 70)
-                elif self._state_natwake:
-                    draw.string("(Natural wake)", 0, 70)
-            else:
-                draw.string('{:02d}:{:02d}  ->  ??'.format(ti_start[3], ti_start[4]), 0, 50)
+            
+            #draw.string('Tracking in progress', 0, 110)
             #draw.string("data points: {} / {}".format(str(self._data_point_nb), str(self._data_point_nb * _FREQ // _STORE_FREQ)), 0, 110)
             if self._track_HR_once:
                 draw.string("(ongoing)", 0, 170)
@@ -448,42 +356,19 @@ class SleepTkApp():
             self._spin_M = widgets.Spinner(150, 70, 0, 59, 2, 5)
             self._state_spinval_H = _OFF
             self._state_spinval_M = _OFF
-            self.check_al = widgets.Checkbox(x=0, y=40, label="Wake me up")
-            self.check_al.state = self._state_alarm
-            self.check_al.draw()
+            #self.check_al = widgets.Checkbox(x=0, y=40, label="Wake me up")
+            #self.check_al.state = self._state_alarm
+            #self.check_al.draw()
+            draw.string("Let's Track!", 0, 170)
 
-            if self._state_alarm:
-                if (self._state_spinval_H, self._state_spinval_M) == (_OFF, _OFF):
-                    # suggest wake up time, on the basis of desired sleep goal + time to fall asleep
-                    (H, M) = wasp.watch.rtc.get_localtime()[3:5]
-                    goal_h = _SLEEP_GOAL_CYCLE * _CYCLE_LENGTH // 60
-                    goal_m = _SLEEP_GOAL_CYCLE * _CYCLE_LENGTH % 60
-                    M += goal_m
-                    while M % 5 != 0:
-                        M += 1
-                    self._state_spinval_H = ((H + goal_h) % 24 + (M // 60)) % 24
-                    self._state_spinval_M = M % 60
-                self._spin_H.value = self._state_spinval_H
-                self._spin_M.value = self._state_spinval_M
-                self._spin_H.draw()
-                self._spin_M.draw()
-                if self._state_alarm:
-                    self._draw_duration(draw)
         elif self._page == _SETTINGS2:
-            self.check_body_tracking = widgets.Checkbox(x=0, y=40, label="Movement tracking")
+            self.check_body_tracking = widgets.Checkbox(x=0, y=40, label="Movement")
             self.check_body_tracking.state = self._state_body_tracking
             self.check_body_tracking.draw()
             if self._state_body_tracking:
-                self.btn_HR = widgets.Checkbox(x=0, y=80, label="Heart rate tracking")
+                self.btn_HR = widgets.Checkbox(x=0, y=80, label="Heart rate")
                 self.btn_HR.state = self._state_HR_tracking
                 self.btn_HR.draw()
-            if self._state_alarm:
-                self.check_grad = widgets.Checkbox(0, 120, "Gradual wake")
-                self.check_grad.state = self._state_gradual_wake
-                #self.check_grad.draw()
-                self.check_natwake = widgets.Checkbox(0, 160, "Natural wake")
-                self.check_natwake.state = self._state_natwake
-                #self.check_natwake.draw()
             self.btn_sta = widgets.Button(x=0, y=200, w=240, h=40, label="Start")
             self.btn_sta.draw()
         draw.reset()
@@ -527,28 +412,8 @@ class SleepTkApp():
         else:
             self.next_track_time = None
 
-        if (self._state_gradual_wake or self._state_natwake) and not self._state_alarm:
-            # fix incompatible settings
-            self._state_gradual_wake = _OFF
-            self._state_natwake = _OFF
 
-        # setting up alarm
-        if self._state_alarm:
-            self._old_notification_level = wasp.system.notify_level
-            self._WU_t = self._read_time(self._state_spinval_H, self._state_spinval_M)
-            self._WU_t_orig = self._read_time(self._state_spinval_H, self._state_spinval_M)
-            if self._state_natwake:
-                wasp.system.set_alarm(self._WU_t, self._start_natural_wake)
-            else:
-                wasp.system.set_alarm(self._WU_t, self._activate_ticks_to_ring)
-
-            # also set alarm to vibrate a tiny bit before wake up time
-            # to wake up gradually
-            if self._state_gradual_wake:
-                for t in _GRADUAL_WAKE:
-                    wasp.system.set_alarm(self._WU_t - int(t*60), self._tiny_vibration)
-        else:
-            self._WU_t = 0  # this is just to avoid the app overwriting itself when going in the background
+        self._WU_t = 0  # this is just to avoid the app overwriting itself when going in the background
 
         # reduce brightness
         self._old_brightness_level = wasp.system.brightness
@@ -565,17 +430,14 @@ class SleepTkApp():
             if ble.enabled():
                 ble.disable()
 
-        self._page = _SLEEPING
+        self._page = _TRACKING
         self._stop_trial = 0
 
         # save settings as future defaults
         if hasattr(wasp.system, "set") and callable(wasp.system.set):
-            wasp.system.set("sleeptk_settings",
-                    [self._state_alarm,
-                     self._state_body_tracking,
+            wasp.system.set("track_settings",
+                    [self._state_body_tracking,
                      self._state_HR_tracking,
-                     self._state_gradual_wake,
-                     self._state_natwake
                      ])
 
     def _read_time(self, HH, MM):
@@ -590,12 +452,6 @@ class SleepTkApp():
     def _stop_tracking(self, keep_main_alarm=False):
         """called by touching "STOP TRACKING" or when battery is low"""
         self._currently_tracking = False
-        wasp.system.cancel_alarm(None, self._trackOnce)
-        if not keep_main_alarm:
-            # to keep the alarm when stopping because of low battery
-            wasp.system.cancel_alarm(None, self._start_natural_wake)
-            wasp.system.cancel_alarm(None, self._activate_ticks_to_ring)
-            wasp.system.cancel_alarm(None, self._tiny_vibration)
         wasp.watch.hrs.disable()
         self._periodicSave()
         wasp.gc.collect()
@@ -610,9 +466,14 @@ class SleepTkApp():
             if xyz == (0, 0, 0):
                 wasp.watch.accel.reset()
                 xyz = wasp.watch.accel.accel_xyz()
-            buff[0] += (abs(self._accel_memory[0]) - abs(xyz[0]))
-            buff[1] += (abs(self._accel_memory[1]) - abs(xyz[1]))
-            buff[2] += (abs(self._accel_memory[2]) - abs(xyz[2]))
+
+            buff[0] = xyz[0]
+            buff[1] = xyz[1]
+            buff[2] = xyz[2]
+            
+            #buff[0] += (abs(self._accel_memory[0]) - abs(xyz[0]))
+            #buff[1] += (abs(self._accel_memory[1]) - abs(xyz[1]))
+            #buff[2] += (abs(self._accel_memory[2]) - abs(xyz[2]))
             self._accel_memory = array("f", (xyz[0], xyz[1], xyz[2]))  # contains previous accelerometer value
             self._data_point_nb += 1
 
@@ -626,9 +487,9 @@ class SleepTkApp():
                 self._stop_tracking(keep_main_alarm=True)
                 h, m = wasp.watch.time.localtime(wasp.watch.rtc.time())[3:5]
                 wasp.system.notify(wasp.watch.rtc.get_uptime_ms(), {
-                    "src": "SleepTk",
+                    "src": "TrackApp",
                     "title": "Bat low",
-                    "body": "Stopped tracking sleep at {}h{}m because your "
+                    "body": "Stopped tracking at {}h{}m because your "
                             "battery went below {}%. Alarm kept "
                             "on but bluetooth turned off.".format(
                                 h, m, _BATTERY_THRESHOLD)})
@@ -697,22 +558,16 @@ class SleepTkApp():
                         ))
             """
             motion = buff
-            # only write the number if it's not obvious, meaning saving was
-            # delayed
-            timestamp = int((wasp.watch.rtc.time() - self._track_start_time))
-            """
-            timestamp = int((wasp.watch.rtc.time() - self._track_start_time) / _STORE_FREQ)
             
-            if timestamp == self._latest_save + 1:
-            #    self._latest_save = timestamp
-            #    timestamp = ""
-            #else:
-            #    self._latest_save = timestamp
-            """
+            timestamp = int(wasp.watch.rtc.time() - self._track_start_time)
+            
+    
             with open(self.filep, "ab") as f:
-                f.write("\n{},{},{},{}".format(
+                f.write("\n{},{},{},{},{},{}".format(
                     timestamp,
-                    motion,
+                    motion[0],
+                    motion[1],
+                    motion[2],
                     bpm,
                     meta,
                     ).encode("ascii"))
@@ -723,77 +578,14 @@ class SleepTkApp():
             self._meta_state = 0
             wasp.gc.collect()
 
-    def _activate_ticks_to_ring(self):
-        """listen to ticks every second, telling the watch to vibrate and
-        completely wake the user up"""
-        if not hasattr(self, "_WU_t"):
-            # alarm was already started and stopped
-            return
-        wasp.system.wake()
-        wasp.system.switch(self)
-        self._page = _RINGING
-        self._n_vibration = 0
-        wasp.system.request_tick(period_ms=1000)
-        wasp.system.notify_level = self._old_notification_level  # restore notification level
-        wasp.system.brightness = self._old_brightness_level
-        wasp.gc.collect()
-        if abs(int(wasp.watch.rtc.time()) - self._last_touch) > 5:
-            wasp.watch.display.mute(True)
-            wasp.watch.display.poweroff()
-            wasp.watch.backlight.set(0)
-        self._draw()
-
-    def _start_natural_wake(self):
-        """do a tiny vibration every 30s until the user wakes up"""
-        if not hasattr(self, "_WU_t"):
-            # alarm was already started and stopped
-            return
-        wasp.system.wake()
-        wasp.system.switch(self)
-        wasp.gc.collect()
-
-        # cancel alarm then set to of them to make sure it does not skip one
-        wasp.system.cancel_alarm(None, self._start_natural_wake)
-        self._WU_t = int(wasp.watch.rtc.time() + _NATURAL_WAKE_IVL + _NATURAL_WAKE_IVL * _NATURAL_WAKE_RAND / 100 * (random.random() - 0.5) * 2)
-        wasp.system.set_alarm(self._WU_t, self._start_natural_wake)
-        self._page = _RINGING
-
-        wasp.system.notify_level = self._old_notification_level
-        wasp.system.brightness = self._old_brightness_level
-        self._n_vibration = 0
-        if abs(int(wasp.watch.rtc.time()) - self._last_touch) > 5:
-            wasp.watch.display.mute(True)
-            wasp.watch.display.poweroff()
-            wasp.watch.backlight.set(0)
-
-        # tiny vibration
-        wasp.watch.vibrator.pulse(duty=3, ms=50)
-        if self._meta_state == 1:  # if pressed or touched
-            self._meta_state = 3  # because also pressed
-        else:
-            self._meta_state = 2  # gradual vibration
-        self._draw()
-
-        if not self._track_HR_once and _NATURAL_WAKE_IVL >= 60:
-            # if the interval is too short, making the watch sleep after
-            # each vibration will actually make it wait too long between
-            # vibrations
-            wasp.watch.display.mute(False)
-            wasp.watch.backlight.set(1)
-            wasp.watch.display.poweron()
-            wasp.system.sleep()
+    
 
     def tick(self, ticks):
-        """vibrate to wake you up OR track heart rate using code from heart.py"""
+        """track heart rate using code from heart.py"""
         wasp.gc.collect()
         wasp.system.switch(self)
-        if self._page == _RINGING and self._state_natwake == _OFF:
-            wasp.system.keep_awake()
-            # in 60 vibrations, ramp up from subtle to strong:
-            wasp.watch.vibrator.pulse(duty=max(80 - 1 * self._n_vibration, 20),
-                                      ms=min(100 + 6 * self._n_vibration, 500))
-            self._n_vibration += 1
-        elif self._track_HR_once:
+    
+        if self._track_HR_once:
             wasp.watch.hrs.enable()
             if self._hrdata is None:
                 self._hrdata = ppg.PPG(wasp.watch.hrs.read_hrs())
@@ -845,24 +637,4 @@ class SleepTkApp():
         """track heart rate at 24Hz"""
         self._hrdata.preprocess(wasp.watch.hrs.read_hrs())
 
-    def _tiny_vibration(self):
-        """vibrate just a tiny bit before waking up, to gradually return
-        to consciousness"""
-        wasp.gc.collect()
-        if abs(int(wasp.watch.rtc.time()) - self._last_touch) > 5:
-            wasp.watch.display.mute(True)
-            wasp.watch.display.poweroff()
-            wasp.watch.backlight.set(0)
-        wasp.system.wake()
-        wasp.system.switch(self)
-        if self._page != _RINGING:  # safeguard: don't vibrate anymore if already on ringing page
-            #wasp.watch.vibrator.pulse(duty=3, ms=50)
-            wasp.watch.vibrator.pulse(duty=80, ms=100)
-            # time.sleep(0.1)
-            # wasp.watch.vibrator.pulse(duty=3, ms=50)
-        if self._meta_state == 1:  # if pressed or touched
-            self._meta_state = 3  # because also pressed
-        else:
-            self._meta_state = 2  # gradual vibration
-        if not self._track_HR_once:
-            wasp.system.sleep()
+

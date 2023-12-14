@@ -2,7 +2,7 @@
 # At least one watch face must be specified. Quick ring apps will be added in order.
 
 [[app]]
-file = 'apps/sleep_tk.py'
+file = 'apps/track.py'
 quick_ring = true
 
 [[app]]
